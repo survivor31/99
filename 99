@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>99 Nights 2D - Vrai Multijoueur</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #05070a;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+            user-select: none;
+        }
+        #mainMenu {
+            position: absolute;
+            background: radial-gradient(circle, #1e1b4b 0%, #090514 100%);
+            width: 900px;
+            height: 650px;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 30;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.9);
+        }
+        .menu-btn {
+            padding: 15px 40px;
+            font-size: 20px;
+            font-weight: bold;
+            background-color: #6366f1;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: 0.2s;
+            margin: 10px;
+            width: 250px;
+        }
+        .menu-btn:hover {
+            background-color: #4f46e5;
+            transform: scale(1.05);
+        }
+        #gameUi {
+            display: none;
+            position: absolute;
+            top: 20px;
+            justify-content: space-between;
+            width: 900px;
+            font-size: 18px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.9);
+            pointer-events: none;
+            z-index: 10;
+        }
+        canvas {
+            border: 4px solid #111827;
+            border-radius: 12px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+            cursor: crosshair;
+        }
+        #gameOverScreen {
+            display: none;
+            position: absolute;
+            background: rgba(5, 5, 10, 0.9);
+            width: 900px;
+            height: 650px;
+            border-radius: 12px;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 20;
+        }
+    </style>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+<body>
+
+    <div id="mainMenu">
+        <h1 style="font-size: 45px; margin-bottom: 40px; letter-spacing: 3px; color: #a5b4fc;">99 NIGHTS 2D</h1>
+        <button class="menu-btn" onclick="startSolo()">Mode Solo</button>
+        <button class="menu-btn" style="background-color: #059669;" onclick="startMultiplayer()">Lancer Multijoueur</button>
+    </div>
+
+    <div id="gameUi">
+        <div id="healthUi">❤️ PV: 999</div>
+        <div id="woodUi">🪵 Bois: 0</div>
+        <div id="fireUi">🔥 Feu: 100%</div>
+        <div id="nightUi">⏳ État: Jour</div>
+    </div>
+
+    <div id="gameOverScreen">
+        <h1 style="color: #ef4444; font-size: 50px; margin-bottom: 10px;">LA FORÊT VOUS A REPRIS</h1>
+        <button class="menu-btn" onclick="location.reload()">Retour au Menu</button>
+    </div>
+
+    <canvas id="gameCanvas" width="900" height="650"></canvas>
+
+    <script>
+        // /!\ METS TON LIEN RENDER ICI /!\
+        const socket = io("https://nine9night-s5fb.onrender.com");
+
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        const healthUi = document.getElementById("healthUi");
+        const woodUi = document.getElementById("woodUi");
+        const fireUi = document.getElementById("fireUi");
+        const nightUi = document.getElementById("nightUi");
+        const gameOverScreen = document.getElementById("gameOverScreen");
+        const mainMenu = document.getElementById("mainMenu");
+
+        let gameActive = false;
+        let isMultiplayer = false;
+        let woodCount = 0;
+        let cycleTimer = 0; 
+        let isNight = false;
+        let nightCounter = 1;
+        let spawnTimer = 0;
+
+        const keys = {};
+        const mouse = { x: 0, y: 0 };
+
+        let player;
+        let otherPlayers = {}; // Stocke les données des alliés en ligne
+        let campFire;
+        let trees = [];
+        let enemies = [];
+        let particles = [];
+
+        class Player {
+            constructor(x, y, color = "#3b82f6") {
+                this.x = x; this.y = y;
+                this.radius = 16; this.speed = 6; this.hp = 999;
+                this.angle = 0; this.tool = 'axe';
+                this.color = color;
+                this.isSwinging = false; this.swingAngle = 0; this.swingDir = 1;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                
+                // Dessin du corps
+                ctx.beginPath();
+                ctx.fillStyle = this.color;
+                ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Outil actif
+                if (this.tool === 'axe') {
+                    ctx.save();
+                    if (this.isSwinging) ctx.rotate(this.swingAngle);
+                    ctx.fillStyle = "#a16207"; ctx.fillRect(10, -3, 22, 5); // Manche
+                    ctx.fillStyle = "#94a3b8"; ctx.fillRect(26, -10, 8, 16); // Fer
+                    ctx.restore();
+                } else {
+                    ctx.fillStyle = "#1e293b"; ctx.fillRect(5, -5, 25, 9); // Fusil
+                }
+                ctx.restore();
+            }
+
+            update() {
+                let oldX = this.x;
+                let oldY = this.y;
+
+                if (keys['z'] || keys['w'] || keys['arrowup']) this.y -= this.speed;
+                if (keys['s'] || keys['arrowdown']) this.y += this.speed;
+                if (keys['q'] || keys['a'] || keys['arrowleft']) this.x -= this.speed;
+                if (keys['d'] || keys['arrowright']) this.x += this.speed;
+
+                this.x = Math.max(this.radius, Math.min(canvas.width - this.radius, this.x));
+                this.y = Math.max(this.radius, Math.min(canvas.height - this.radius, this.y));
+                this.angle = Math.atan2(mouse.y - this.y, mouse.x - this.x);
+
+                // Si on a bougé et qu'on est en multi, on prévient le serveur Render
+                if (isMultiplayer && (oldX !== this.x || oldY !== this.y)) {
+                    socket.emit('playerMovement', { x: this.x, y: this.y, angle: this.angle, tool: this.tool });
+                }
+
+                if (this.isSwinging) {
+                    this.swingAngle += 0.25 * this.swingDir;
+                    if (this.swingAngle > 1.2) this.swingDir = -1;
+                    if (this.swingAngle < -0.5) { this.isSwinging = false; this.swingAngle = 0; this.swingDir = 1; }
+                }
+            }
+        }
+
+        class CampFire {
+            constructor(x, y) { this.x = x; this.y = y; this.radius = 22; this.fuel = 100; }
+            draw() {
+                let gradient = ctx.createRadialGradient(this.x, this.y, 5, this.x, this.y, this.fuel * 2.5);
+                gradient.addColorStop(0, `rgba(249, 115, 22, ${isNight ? 0.45 : 0.2})`);
+                gradient.addColorStop(1, 'rgba(0,0,0,0)');
+                ctx.fillStyle = gradient; ctx.beginPath(); ctx.arc(this.x, this.y, this.fuel * 2.5, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = "#ef4444"; ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.fill();
+            }
+            update() {
+                if (this.fuel > 0) this.fuel -= isNight ? 0.04 : 0.015;
+                fireUi.innerText = `🔥 Feu: ${Math.floor(this.fuel)}%`;
+            }
+        }
+
+        class Tree {
+            constructor(x, y) { this.x = x; this.y = y; this.radius = 28; this.hp = 2; }
+            draw() {
+                ctx.beginPath(); ctx.fillStyle = "#78350f"; ctx.arc(this.x, this.y, 10, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.fillStyle = "#047857"; ctx.arc(this.x, this.y - 5, this.radius, 0, Math.PI * 2); ctx.fill();
+            }
+        }
+
+        class Enemy {
+            constructor(x, y) { this.x = x; this.y = y; this.radius = 14; this.speed = 2; this.hp = 20; }
+            draw() {
+                ctx.beginPath(); ctx.fillStyle = "#7e22ce"; ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.fill();
+            }
+            update() {
+                let dx = player.x - this.x, dy = player.y - this.y, dist = Math.hypot(dx, dy);
+                if (dist > 5) { this.x += (dx / dist) * this.speed; this.y += (dy / dist) * this.speed; }
+                if (dist < this.radius + player.radius) {
+                    player.hp -= 2; healthUi.innerText = `❤️ PV: ${Math.max(0, Math.floor(player.hp))}`;
+                    if (player.hp <= 0) endGame();
+                }
+            }
+        }
+
+        function spawnTree() { trees.push(new Tree(Math.random() * 800 + 50, Math.random() * 550 + 50)); }
+
+        // --- GESTION DES BOUTONS DU MENU ---
+        function startSolo() {
+            mainMenu.style.display = "none";
+            document.getElementById("gameUi").style.display = "flex";
+            isMultiplayer = false;
+            resetGame();
+        }
+
+        function startMultiplayer() {
+            mainMenu.style.display = "none";
+            document.getElementById("gameUi").style.display = "flex";
+            isMultiplayer = true;
+            resetGame();
+        }
+
+        // --- ÉCOUTEURS RESEAU (SOCKET.IO) ---
+        socket.on('currentPlayers', (players) => {
+            Object.keys(players).forEach((id) => {
+                if (id !== socket.id) {
+                    otherPlayers[id] = new Player(players[id].x, players[id].y, "#10b981"); // Vert pour les alliés
+                }
+            });
+        });
+
+        socket.on('newPlayer', (playerInfo) => {
+            otherPlayers[playerInfo.id] = new Player(playerInfo.x, playerInfo.y, "#10b981");
+        });
+
+        socket.on('playerMoved', (playerInfo) => {
+            if (otherPlayers[playerInfo.id]) {
+                otherPlayers[playerInfo.id].x = playerInfo.x;
+                otherPlayers[playerInfo.id].y = playerInfo.y;
+                otherPlayers[playerInfo.id].angle = playerInfo.angle;
+                otherPlayers[playerInfo.id].tool = playerInfo.tool;
+            }
+        });
+
+        socket.on('playerActionTriggered', (data) => {
+            if (otherPlayers[data.id] && data.action === 'swing') {
+                otherPlayers[data.id].isSwinging = true;
+            }
+        });
+
+        socket.on('playerDisconnected', (id) => {
+            delete otherPlayers[id];
+        });
+
+        // --- BOUCLE DU JEU ---
+        function gameLoop() {
+            ctx.fillStyle = "#0f172a"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (gameActive) {
+                cycleTimer++;
+                if (cycleTimer > 800) {
+                    isNight = !isNight; cycleTimer = 0;
+                    if (isNight) {
+                        player.tool = 'gun'; nightUi.innerText = `🌙 Nuit ${nightCounter}`;
+                    } else {
+                        player.tool = 'axe'; nightCounter++; nightUi.innerText = `☀️ Jour`;
+                        while(trees.length < 5) spawnTree();
+                    }
+                    if (isMultiplayer) socket.emit('playerMovement', { x: player.x, y: player.y, angle: player.angle, tool: player.tool });
+                }
+
+                if (isNight) {
+                    spawnTimer++;
+                    if (spawnTimer > 40) { enemies.push(new Enemy(Math.random() * canvas.width, -20)); spawnTimer = 0; }
+                }
+
+                campFire.update(); campFire.draw();
+                trees.forEach(tree => tree.draw());
+                
+                // Dessiner les AUTRES JOUEURS connectés
+                Object.keys(otherPlayers).forEach((id) => {
+                    otherPlayers[id].draw();
+                });
+
+                player.update(); player.draw();
+
+                for (let i = enemies.length - 1; i >= 0; i--) { enemies[i].update(); enemies[i].draw(); }
+
+                if (isNight) {
+                    ctx.fillStyle = "rgba(4, 5, 15, 0.65)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                }
+            }
+            requestAnimationFrame(gameLoop);
+        }
+
+        canvas.addEventListener('mousedown', () => {
+            if (!gameActive) return;
+            if (isMultiplayer) socket.emit('playerAction', { action: 'swing' });
+
+            if (!isNight) {
+                player.isSwinging = true;
+                let distToFire = Math.hypot(campFire.x - player.x, campFire.y - player.y);
+                if (distToFire < 55 && woodCount > 0) {
+                    woodCount--; campFire.fuel = Math.min(100, campFire.fuel + 15);
+                    woodUi.innerText = `🪵 Bois: ${woodCount}`;
+                    return;
+                }
+                for (let i = trees.length - 1; i >= 0; i--) {
+                    if (Math.hypot(trees[i].x - player.x, trees[i].y - player.y) < 50) {
+                        trees[i].hp--;
+                        if (trees[i].hp <= 0) { trees.splice(i, 1); woodCount += 3; woodUi.innerText = `🪵 Bois: ${woodCount}`; }
+                        break;
+                    }
+                }
+            } else {
+                let targetAngle = player.angle;
+                for (let i = enemies.length - 1; i >= 0; i--) {
+                    let diffAngle = Math.abs(targetAngle - Math.atan2(enemies[i].y - player.y, enemies[i].x - player.x));
+                    if (diffAngle < 0.3 && Math.hypot(enemies[i].x - player.x, enemies[i].y - player.y) < 350) {
+                        enemies.splice(i, 1);
+                        break;
+                    }
+                }
+            }
+        });
+
+        function endGame() { gameActive = false; gameOverScreen.style.display = "flex"; }
+        function resetGame() {
+            player = new Player(canvas.width / 2 - 80, canvas.height / 2); campFire = new CampFire(canvas.width / 2, canvas.height / 2);
+            trees = []; enemies = []; woodCount = 0; cycleTimer = 0; isNight = false; nightCounter = 1;
+            for (let i = 0; i < 6; i++) spawnTree();
+            gameActive = true;
+        }
+
+        window.addEventListener('keydown', (e) => keys[e.key.toLowerCase()] = true);
+        window.addEventListener('keyup', (e) => keys[e.key.toLowerCase()] = false);
+        canvas.addEventListener('mousemove', (e) => { const rect = canvas.getBoundingClientRect(); mouse.x = e.clientX - rect.left; mouse.y = e.clientY - rect.top; });
+        gameLoop();
+    </script>
+</body>
+</html>
